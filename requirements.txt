@@ -1,0 +1,9 @@
+nnunetv2
+SimpleITK
+numpy
+scipy
+scikit-image
+connected-components-3d
+scikit-fmm
+numpy-indexed
+tqdm
