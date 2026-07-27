@@ -35,6 +35,13 @@ def run():
     for s in ["raw", "pp", "anat_in", "anat_out", "csm_in", "csm_out", "inst"]:
         (WORK / s).mkdir(parents=True, exist_ok=True)
 
+    # diagnostic : contenu du dossier modele (doit contenir Dataset601... et Dataset002...)
+    print("MODEL_DIR =", MODEL_DIR, flush=True)
+    try:
+        print("contenu:", sorted(os.listdir(MODEL_DIR)), flush=True)
+    except Exception as e:
+        print("!! impossible de lister MODEL_DIR:", e, flush=True)
+
     in_path = _find_input()
     print("Input:", in_path, flush=True)
     ct_img = sitk.ReadImage(in_path)
@@ -62,7 +69,7 @@ def run():
         sitk.WriteImage(mi, str(WORK / "csm_in" / f"{name}_0000.nii.gz"), useCompression=True)
         present.append((name, cls, off))
 
-    fused = np.zeros(ct_arr.shape, dtype=np.uint16)
+    fused = np.zeros(ct_arr.shape, dtype=np.uint8)  # labels 0-200 tiennent en uint8, comme le GT
     if present:
         # 002 CSM (5 folds)
         _sh(["nnUNetv2_predict", "-i", str(WORK / "csm_in"), "-o", str(WORK / "csm_out"),
@@ -92,11 +99,16 @@ def run():
             print(f"{name}: {nid-1} fragments", flush=True)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    out = sitk.GetImageFromArray(fused)
+    n_fg = int((fused > 0).sum())
+    u = np.unique(fused)
+    if n_fg == 0:
+        print("!! ATTENTION: masque de sortie VIDE (aucun voxel foreground) "
+              "-> GC rejettera avec 'segments could not be determined'", flush=True)
+    out = sitk.GetImageFromArray(fused)  # uint8
     out.CopyInformation(ct_img)
     sitk.WriteImage(out, str(OUTPUT_DIR / f"{uid}.mha"), useCompression=True)
-    u = np.unique(fused)
-    print(f"Output OK | {len(u)-1} fragments | {u[u>0].tolist()[:15]}", flush=True)
+    print(f"Output OK | dtype={fused.dtype} | {len(u)-1} fragments | "
+          f"{n_fg} voxels fg | IDs {u[u>0].tolist()[:15]}", flush=True)
     return 0
 
 
