@@ -1,4 +1,4 @@
-import os, glob, subprocess
+import os, glob, subprocess, time
 from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
@@ -10,6 +10,11 @@ MODEL_DIR = os.environ.get("PENGWIN_MODEL", "/opt/ml/model")
 WORK = Path(os.environ.get("PENGWIN_WORK", "/tmp/work"))
 FRAC = os.environ.get("PENGWIN_FRAC", "/opt/app/frac_to_instance.py")
 
+# budget temps : folds et TTA configurables. Defaut = config RAPIDE (1 fold CSM, TTA off)
+ANAT_FOLDS = os.environ.get("ANAT_FOLDS", "0").split()
+CSM_FOLDS = os.environ.get("CSM_FOLDS", "0").split()
+TTA = os.environ.get("TTA", "0") == "1"
+
 BONES = [("sacrum", 1, 0), ("leftHip", 2, 50), ("rightHip", 3, 100), ("femur", 4, 150)]
 MIN_MM3 = 500.0
 CAP = 50
@@ -17,7 +22,18 @@ CAP = 50
 
 def _sh(cmd):
     print(">>", " ".join(cmd), flush=True)
+    t0 = time.time()
     subprocess.run(cmd, check=True)
+    print(f"   ({time.time()-t0:.1f}s)", flush=True)
+
+
+def _predict(in_dir, out_dir, dataset, plans, trainer, folds):
+    cmd = ["nnUNetv2_predict", "-i", str(in_dir), "-o", str(out_dir),
+           "-d", dataset, "-c", "3d_fullres", "-p", plans, "-tr", trainer,
+           "-f", *folds, "-npp", "1", "-nps", "1"]
+    if not TTA:
+        cmd.append("--disable_tta")
+    _sh(cmd)
 
 
 def _find_input():
@@ -42,6 +58,8 @@ def run():
     except Exception as e:
         print("!! impossible de lister MODEL_DIR:", e, flush=True)
 
+    t_start = time.time()
+    print(f"config: ANAT_FOLDS={ANAT_FOLDS} CSM_FOLDS={CSM_FOLDS} TTA={TTA}", flush=True)
     in_path = _find_input()
     print("Input:", in_path, flush=True)
     ct_img = sitk.ReadImage(in_path)
@@ -52,9 +70,8 @@ def run():
     sitk.WriteImage(ct_img, str(WORK / "anat_in" / "case_0000.nii.gz"), useCompression=True)
 
     # 601 anatomique
-    _sh(["nnUNetv2_predict", "-i", str(WORK / "anat_in"), "-o", str(WORK / "anat_out"),
-         "-d", "601", "-c", "3d_fullres", "-p", "nnUNetPlans", "-tr", "nnUNetTrainer_250epochs",
-         "-f", "0", "-npp", "1", "-nps", "1"])
+    _predict(WORK / "anat_in", WORK / "anat_out", "601", "nnUNetPlans",
+             "nnUNetTrainer_250epochs", ANAT_FOLDS)
     anat_arr = sitk.GetArrayFromImage(sitk.ReadImage(str(WORK / "anat_out" / "case.nii.gz")))
 
     # masquage per-os
@@ -71,10 +88,9 @@ def run():
 
     fused = np.zeros(ct_arr.shape, dtype=np.uint8)  # labels 0-200 tiennent en uint8, comme le GT
     if present:
-        # 002 CSM (5 folds)
-        _sh(["nnUNetv2_predict", "-i", str(WORK / "csm_in"), "-o", str(WORK / "csm_out"),
-             "-d", "002", "-c", "3d_fullres", "-p", "nnUNetResEncUNetMPlans", "-tr", "nnUNetTrainer",
-             "-f", "0", "1", "2", "3", "4", "-npp", "1", "-nps", "1"])
+        # 002 CSM
+        _predict(WORK / "csm_in", WORK / "csm_out", "002", "nnUNetResEncUNetMPlans",
+                 "nnUNetTrainer", CSM_FOLDS)
         # CSM -> instances
         _sh(["python", FRAC, "-i", str(WORK / "csm_out"), "-o", str(WORK / "inst"),
              "-k", "5", "-c", "100", "--device", "cuda"])
@@ -109,8 +125,10 @@ def run():
     sitk.WriteImage(out, str(OUTPUT_DIR / f"{uid}.mha"), useCompression=True)
     print(f"Output OK | dtype={fused.dtype} | {len(u)-1} fragments | "
           f"{n_fg} voxels fg | IDs {u[u>0].tolist()[:15]}", flush=True)
+    print(f"TEMPS TOTAL: {time.time()-t_start:.1f}s", flush=True)
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(run())
+
