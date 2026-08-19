@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 def save_nifti(arr, ref_img, out_path):
     """Save a NIfTI file inheriting spacing / origin / direction from ref_img."""
-    out_img = sitk.GetImageFromArray(arr.astype(np.int32))  # instance IDs may be large; use int32
+    out_img = sitk.GetImageFromArray(arr.astype(np.int32))  
     out_img.CopyInformation(ref_img)
     sitk.WriteImage(out_img, out_path)
 
