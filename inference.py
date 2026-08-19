@@ -19,6 +19,29 @@ BONES = [("sacrum", 1, 0), ("leftHip", 2, 50), ("rightHip", 3, 100), ("femur", 4
 MIN_MM3 = 500.0
 CAP = 50
 
+def lr_from_geometry(image_path) -> tuple:
+    r = sitk.ImageFileReader()
+    r.SetFileName(str(image_path))
+    r.ReadImageInformation()                              
+    D  = np.array(r.GetDirection()).reshape(3, 3)         
+    sp = np.array(r.GetSpacing())
+    Lcomp_voxel = D[0, :] * sp                            
+    Lcomp_array = Lcomp_voxel[::-1]                       
+    lr_axis = int(np.argmax(np.abs(Lcomp_array)))
+    return lr_axis, bool(Lcomp_array[lr_axis] > 0)
+
+def apply_midline_split(pred: np.ndarray, lr_axis: int, left_is_positive: bool) -> np.ndarray:
+    hip = (pred == 2) | (pred == 3)
+    if not hip.any() or not (pred == 1).any():
+        return pred                                       
+    mid = np.argwhere(pred == 1).mean(0)[lr_axis]
+    out = pred.copy()
+    idx = np.argwhere(hip)
+    coord = idx[:, lr_axis]
+    left = coord > mid if left_is_positive else coord < mid
+    out[tuple(idx[left].T)]  = 2                          
+    out[tuple(idx[~left].T)] = 3                          
+    return out
 
 def _sh(cmd):
     print(">>", " ".join(cmd), flush=True)
@@ -73,6 +96,10 @@ def run():
     _predict(WORK / "anat_in", WORK / "anat_out", "601", "nnUNetPlans",
              "nnUNetTrainer_250epochs", ANAT_FOLDS)
     anat_arr = sitk.GetArrayFromImage(sitk.ReadImage(str(WORK / "anat_out" / "case.nii.gz")))
+
+    lr_axis, left_is_positive = lr_from_geometry(in_path)
+    anat_arr = apply_midline_split(anat_arr, lr_axis, left_is_positive)
+
 
     # masquage per-os
     present = []
@@ -131,4 +158,3 @@ def run():
 
 if __name__ == "__main__":
     raise SystemExit(run())
-
