@@ -2,70 +2,60 @@ import os, glob, subprocess, time
 from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
-
 # chemins GC par défaut, surchargables par env (pour test natif)
 INPUT_DIR = Path(os.environ.get("PENGWIN_INPUT", "/input/images/peripelvic-fracture-ct"))
 OUTPUT_DIR = Path(os.environ.get("PENGWIN_OUTPUT", "/output/images/peripelvic-fracture-ct-segmentation"))
 MODEL_DIR = os.environ.get("PENGWIN_MODEL", "/opt/ml/model")
 WORK = Path(os.environ.get("PENGWIN_WORK", "/tmp/work"))
 FRAC = os.environ.get("PENGWIN_FRAC", "/opt/app/frac_to_instance.py")
-
 # budget temps : folds et TTA configurables. Defaut = config RAPIDE (1 fold CSM, TTA off)
 ANAT_FOLDS = os.environ.get("ANAT_FOLDS", "0").split()
 CSM_FOLDS = os.environ.get("CSM_FOLDS", "0").split()
 TTA = os.environ.get("TTA", "0") == "1"
-
+STEP = os.environ.get("STEP", "0.8")      # sliding-window step (grand = rapide)
+FRAC_C = os.environ.get("FRAC_C", "25")   # candidats frac_to_instance (petit = rapide)
 BONES = [("sacrum", 1, 0), ("leftHip", 2, 50), ("rightHip", 3, 100), ("femur", 4, 150)]
 MIN_MM3 = 500.0
 CAP = 50
-
 def lr_from_geometry(image_path) -> tuple:
     r = sitk.ImageFileReader()
     r.SetFileName(str(image_path))
-    r.ReadImageInformation()                              
-    D  = np.array(r.GetDirection()).reshape(3, 3)         
+    r.ReadImageInformation()
+    D  = np.array(r.GetDirection()).reshape(3, 3)
     sp = np.array(r.GetSpacing())
-    Lcomp_voxel = D[0, :] * sp                            
-    Lcomp_array = Lcomp_voxel[::-1]                       
+    Lcomp_voxel = D[0, :] * sp
+    Lcomp_array = Lcomp_voxel[::-1]
     lr_axis = int(np.argmax(np.abs(Lcomp_array)))
     return lr_axis, bool(Lcomp_array[lr_axis] > 0)
-
 def apply_midline_split(pred: np.ndarray, lr_axis: int, left_is_positive: bool) -> np.ndarray:
     hip = (pred == 2) | (pred == 3)
     if not hip.any() or not (pred == 1).any():
-        return pred                                       
+        return pred
     mid = np.argwhere(pred == 1).mean(0)[lr_axis]
     out = pred.copy()
     idx = np.argwhere(hip)
     coord = idx[:, lr_axis]
     left = coord > mid if left_is_positive else coord < mid
-    out[tuple(idx[left].T)]  = 2                          
-    out[tuple(idx[~left].T)] = 3                          
+    out[tuple(idx[left].T)]  = 2
+    out[tuple(idx[~left].T)] = 3
     return out
-
 def _sh(cmd):
     print(">>", " ".join(cmd), flush=True)
     t0 = time.time()
     subprocess.run(cmd, check=True)
     print(f"   ({time.time()-t0:.1f}s)", flush=True)
-
-
 def _predict(in_dir, out_dir, dataset, plans, trainer, folds):
     cmd = ["nnUNetv2_predict", "-i", str(in_dir), "-o", str(out_dir),
            "-d", dataset, "-c", "3d_fullres", "-p", plans, "-tr", trainer,
-           "-f", *folds, "-npp", "1", "-nps", "1"]
+           "-f", *folds, "-npp", "1", "-nps", "1", "-step_size", STEP]
     if not TTA:
         cmd.append("--disable_tta")
     _sh(cmd)
-
-
 def _find_input():
     f = sorted(glob.glob(str(INPUT_DIR / "*.mha")) + glob.glob(str(INPUT_DIR / "*.tif*")))
     if not f:
         raise RuntimeError(f"pas d'entrée dans {INPUT_DIR}")
     return f[0]
-
-
 def run():
     os.environ["nnUNet_results"] = MODEL_DIR
     os.environ["nnUNet_raw"] = str(WORK / "raw")
@@ -73,34 +63,25 @@ def run():
     os.environ.setdefault("nnUNet_n_proc_DA", "2")
     for s in ["raw", "pp", "anat_in", "anat_out", "csm_in", "csm_out", "inst"]:
         (WORK / s).mkdir(parents=True, exist_ok=True)
-
-    # diagnostic : contenu du dossier modele (doit contenir Dataset601... et Dataset002...)
     print("MODEL_DIR =", MODEL_DIR, flush=True)
     try:
         print("contenu:", sorted(os.listdir(MODEL_DIR)), flush=True)
     except Exception as e:
         print("!! impossible de lister MODEL_DIR:", e, flush=True)
-
     t_start = time.time()
-    print(f"config: ANAT_FOLDS={ANAT_FOLDS} CSM_FOLDS={CSM_FOLDS} TTA={TTA}", flush=True)
+    print(f"config: ANAT_FOLDS={ANAT_FOLDS} CSM_FOLDS={CSM_FOLDS} TTA={TTA} STEP={STEP} FRAC_C={FRAC_C}", flush=True)
     in_path = _find_input()
     print("Input:", in_path, flush=True)
     ct_img = sitk.ReadImage(in_path)
     ct_arr = sitk.GetArrayFromImage(ct_img)
     uid = Path(in_path).name.split(".")[0]
-
-    # CT -> nii.gz _0000 (modèles entraînés en .nii.gz)
     sitk.WriteImage(ct_img, str(WORK / "anat_in" / "case_0000.nii.gz"), useCompression=True)
-
     # 601 anatomique
     _predict(WORK / "anat_in", WORK / "anat_out", "601", "nnUNetPlans",
              "nnUNetTrainer_250epochs", ANAT_FOLDS)
     anat_arr = sitk.GetArrayFromImage(sitk.ReadImage(str(WORK / "anat_out" / "case.nii.gz")))
-
     lr_axis, left_is_positive = lr_from_geometry(in_path)
     anat_arr = apply_midline_split(anat_arr, lr_axis, left_is_positive)
-
-
     # masquage per-os
     present = []
     for name, cls, off in BONES:
@@ -112,16 +93,14 @@ def run():
         mi.CopyInformation(ct_img)
         sitk.WriteImage(mi, str(WORK / "csm_in" / f"{name}_0000.nii.gz"), useCompression=True)
         present.append((name, cls, off))
-
-    fused = np.zeros(ct_arr.shape, dtype=np.uint8)  # labels 0-200 tiennent en uint8, comme le GT
+    fused = np.zeros(ct_arr.shape, dtype=np.uint8)
     if present:
         # 002 CSM
         _predict(WORK / "csm_in", WORK / "csm_out", "002", "nnUNetResEncUNetMPlans",
                  "nnUNetTrainer", CSM_FOLDS)
         # CSM -> instances
         _sh(["python", FRAC, "-i", str(WORK / "csm_out"), "-o", str(WORK / "inst"),
-             "-k", "5", "-c", "100", "--device", "cuda"])
-        # fusion + offset + clip anatomique + filtre 500 mm3
+             "-k", "5", "-c", FRAC_C, "--device", "cuda"])
         sx, sy, sz = ct_img.GetSpacing()
         vox = sx * sy * sz
         for name, cls, off in present:
@@ -140,21 +119,17 @@ def run():
                 fused[frag] = off + nid
                 nid += 1
             print(f"{name}: {nid-1} fragments", flush=True)
-
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     n_fg = int((fused > 0).sum())
     u = np.unique(fused)
     if n_fg == 0:
-        print("!! ATTENTION: masque de sortie VIDE (aucun voxel foreground) "
-              "-> GC rejettera avec 'segments could not be determined'", flush=True)
-    out = sitk.GetImageFromArray(fused)  # uint8
+        print("!! ATTENTION: masque de sortie VIDE (aucun voxel foreground)", flush=True)
+    out = sitk.GetImageFromArray(fused)
     out.CopyInformation(ct_img)
     sitk.WriteImage(out, str(OUTPUT_DIR / f"{uid}.mha"), useCompression=True)
     print(f"Output OK | dtype={fused.dtype} | {len(u)-1} fragments | "
           f"{n_fg} voxels fg | IDs {u[u>0].tolist()[:15]}", flush=True)
     print(f"TEMPS TOTAL: {time.time()-t_start:.1f}s", flush=True)
     return 0
-
-
 if __name__ == "__main__":
     raise SystemExit(run())
