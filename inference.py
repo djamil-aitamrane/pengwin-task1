@@ -15,7 +15,7 @@ TTA = os.environ.get("TTA", "0") == "1"
 STEP = os.environ.get("STEP", "0.8")      # sliding-window step (grand = rapide)
 FRAC_C = os.environ.get("FRAC_C", "25")   # candidats frac_to_instance (petit = rapide)
 BONES = [("sacrum", 1, 0), ("leftHip", 2, 50), ("rightHip", 3, 100), ("femur", 4, 150)]
-MIN_MM3 = 500.0
+MIN_MM3 = 1000.0
 CAP = 50
 def lr_from_geometry(image_path) -> tuple:
     r = sitk.ImageFileReader()
